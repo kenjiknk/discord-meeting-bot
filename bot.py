@@ -46,13 +46,19 @@ async def on_ready():
 
     # Sync instantâneo no guild de teste; global sync pode levar até 1h
     test_guild_id = os.getenv("TEST_GUILD_ID")
-    if test_guild_id:
-        guild = discord.Object(id=int(test_guild_id))
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-    else:
-        synced = await bot.tree.sync()
-    print(f"Slash commands sincronizados: {len(synced)}")
+    try:
+        if test_guild_id:
+            guild = discord.Object(id=int(test_guild_id))
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+        else:
+            synced = await bot.tree.sync()
+        print(f"Slash commands sincronizados: {len(synced)}")
+    except discord.Forbidden:
+        print(
+            "[AVISO] Não foi possível sincronizar slash commands — bot sem scope 'applications.commands'.\n"
+            "        Re-convide o bot com o scope correto: OAuth2 → URL Generator → marque 'applications.commands'."
+        )
 
 
 @bot.tree.command(name="record", description="Entra no seu canal de voz e inicia a gravação")
