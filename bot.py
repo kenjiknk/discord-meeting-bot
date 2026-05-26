@@ -7,7 +7,6 @@ from datetime import datetime
 from collections import defaultdict
 
 import discord
-from discord import app_commands
 from discord.ext import commands, voice_recv
 from dotenv import load_dotenv
 import dave_patch
@@ -57,13 +56,7 @@ async def on_ready():
 
 
 @bot.tree.command(name="record", description="Entra no seu canal de voz e inicia a gravação")
-@app_commands.describe(idioma="Idioma falado na call (padrão: Português)")
-@app_commands.choices(idioma=[
-    app_commands.Choice(name="Português", value="pt"),
-    app_commands.Choice(name="English", value="en"),
-    app_commands.Choice(name="Español", value="es"),
-])
-async def record_command(interaction: discord.Interaction, idioma: str = "pt"):
+async def record_command(interaction: discord.Interaction):
     await interaction.response.defer()
 
     if not interaction.user.voice:
@@ -104,7 +97,6 @@ async def record_command(interaction: discord.Interaction, idioma: str = "pt"):
         "vc": vc,
         "session_dir": session_dir,
         "session_date": datetime.now(),
-        "language": idioma,
         "voice_channel": voice_channel,
         "pcm_buffers": defaultdict(bytearray),
         "processed": defaultdict(int),
@@ -144,7 +136,7 @@ async def record_command(interaction: discord.Interaction, idioma: str = "pt"):
 
     await transcript_channel.send(
         f"🔴 **Gravação iniciada** — {state['session_date'].strftime('%d/%m/%Y %H:%M')}\n"
-        f"Canal de voz: **{voice_channel.name}** | Idioma: **{idioma}**\n"
+        f"Canal de voz: **{voice_channel.name}**\n"
         f"Transcrição em tempo real abaixo:"
     )
 
@@ -185,7 +177,7 @@ async def status_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         f"🔴 **Gravando** — {mins:02d}:{secs:02d}\n"
-        f"Canal: **{state['voice_channel'].name}** | Idioma: **{state['language']}**\n"
+        f"Canal: **{state['voice_channel'].name}**\n"
         f"Participantes com fala: **{total_speakers}** | Chunks transcritos: **{total_chunks}**",
         ephemeral=True,
     )
@@ -311,7 +303,7 @@ async def _process_new_chunks(state: dict) -> None:
         chunk = bytes(unprocessed[:STREAM_CHUNK_BYTES])
         state["processed"][user_id] += STREAM_CHUNK_BYTES
 
-        text = await asyncio.to_thread(transcribe_pcm, chunk, state["language"])
+        text = await asyncio.to_thread(transcribe_pcm, chunk)
         text = text.strip()
 
         if text:
@@ -338,7 +330,7 @@ async def _transcribe_remaining(state: dict) -> None:
             if len(remaining) < 960:
                 continue
 
-            text = await asyncio.to_thread(transcribe_pcm, remaining, state["language"])
+            text = await asyncio.to_thread(transcribe_pcm, remaining)
             text = text.strip()
             if text:
                 state["transcript_accum"][user_id].append(text)

@@ -38,17 +38,10 @@ def _pcm_to_wav_buffer(pcm_data: bytes) -> io.BytesIO:
     return buf
 
 
-_INITIAL_PROMPTS = {
-    "pt": "Transcrição de reunião em Português Brasileiro.",
-    "en": "Meeting transcription in English.",
-    "es": "Transcripción de reunión en Español.",
-}
-
-
-def transcribe_pcm(pcm_data: bytes, language: str | None = None) -> str:
+def transcribe_pcm(pcm_data: bytes) -> str:
     pipeline = load_model()
-    language = language or os.getenv("WHISPER_LANGUAGE", "pt")
-    initial_prompt = _INITIAL_PROMPTS.get(language, "")
+    language = os.getenv("WHISPER_LANGUAGE", "pt")
+    initial_prompt = "Transcrição de reunião em Português Brasileiro."
 
     audio_buf = _pcm_to_wav_buffer(pcm_data)
 
