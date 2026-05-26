@@ -38,10 +38,17 @@ def _pcm_to_wav_buffer(pcm_data: bytes) -> io.BytesIO:
     return buf
 
 
-def transcribe_pcm(pcm_data: bytes) -> str:
-    """Transcreve PCM bruto diretamente da memória — sem arquivo intermediário."""
+_INITIAL_PROMPTS = {
+    "pt": "Transcrição de reunião em Português Brasileiro.",
+    "en": "Meeting transcription in English.",
+    "es": "Transcripción de reunión en Español.",
+}
+
+
+def transcribe_pcm(pcm_data: bytes, language: str | None = None) -> str:
     pipeline = load_model()
-    language = os.getenv("WHISPER_LANGUAGE", "pt")
+    language = language or os.getenv("WHISPER_LANGUAGE", "pt")
+    initial_prompt = _INITIAL_PROMPTS.get(language, "")
 
     audio_buf = _pcm_to_wav_buffer(pcm_data)
 
@@ -50,7 +57,7 @@ def transcribe_pcm(pcm_data: bytes) -> str:
         language=language,
         task="transcribe",
         batch_size=int(os.getenv("WHISPER_BATCH_SIZE", "8")),
-        initial_prompt="Transcrição de reunião em Português Brasileiro.",
+        initial_prompt=initial_prompt,
         vad_filter=True,
         vad_parameters={
             "min_silence_duration_ms": 500,
