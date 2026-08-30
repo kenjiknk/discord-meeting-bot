@@ -1,11 +1,9 @@
-import io
 import os
 import re
-import wave
-from faster_whisper import WhisperModel, BatchedInferencePipeline
+import numpy as np
+from faster_whisper import WhisperModel
 
 _model: WhisperModel | None = None
-_pipeline: BatchedInferencePipeline | None = None
 
 _SPECIAL_TOKENS = re.compile(r'\[[\w\s*]+\]|\([\w\s]+\)|<[\w|]+>', re.IGNORECASE)
 
@@ -14,56 +12,65 @@ CHANNELS = 2
 SAMPLE_WIDTH = 2
 
 
-def load_model() -> BatchedInferencePipeline:
-    global _model, _pipeline
-    if _pipeline is None:
+def load_model() -> WhisperModel:
+    global _model
+    if _model is None:
         name = os.getenv("WHISPER_MODEL", "large-v3")
         threads = int(os.getenv("WHISPER_THREADS", "8"))
         print(f"[Whisper] carregando '{name}' — {threads} threads, int8...")
         _model = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=threads)
-        _pipeline = BatchedInferencePipeline(model=_model)
         print(f"[Whisper] '{name}' pronto.")
-    return _pipeline
+    return _model
 
 
-def _pcm_to_wav_buffer(pcm_data: bytes) -> io.BytesIO:
-    """Encapsula PCM bruto num WAV em memória — sem tocar o disco."""
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(SAMPLE_WIDTH)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(pcm_data)
-    buf.seek(0)
-    return buf
+def _pcm_to_float_mono(pcm_data: bytes) -> np.ndarray:
+    # Stereo int16 48kHz → mono float32 16kHz
+    # 48kHz / 16kHz = 3 → average every 3 samples (box filter, prevents aliasing)
+    samples = np.frombuffer(pcm_data, dtype=np.int16).reshape(-1, CHANNELS)
+    mono = samples.mean(axis=1).astype(np.float32) / 32768.0
+    n = len(mono) // 3 * 3
+    return mono[:n].reshape(-1, 3).mean(axis=1)
 
 
-def transcribe_pcm(pcm_data: bytes) -> str:
-    pipeline = load_model()
+_RMS_THRESHOLD = 0.003
+
+
+def _has_speech(audio: np.ndarray) -> bool:
+    return float(np.sqrt(np.mean(audio ** 2))) >= _RMS_THRESHOLD
+
+
+def transcribe_pcm(pcm_data: bytes, context: str = "") -> str:
+    model = load_model()
     language = os.getenv("WHISPER_LANGUAGE", "pt")
-    initial_prompt = "Transcrição de reunião em Português Brasileiro."
 
-    audio_buf = _pcm_to_wav_buffer(pcm_data)
+    audio = _pcm_to_float_mono(pcm_data)
 
-    segments, info = pipeline.transcribe(
-        audio_buf,
+    if not _has_speech(audio):
+        return ""
+
+    prompt = context if context else "Transcrição de reunião em Português Brasileiro."
+
+    segments, info = model.transcribe(
+        audio,
         language=language,
         task="transcribe",
-        batch_size=int(os.getenv("WHISPER_BATCH_SIZE", "8")),
-        initial_prompt=initial_prompt,
+        initial_prompt=prompt,
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 500,
-            "speech_pad_ms": 200,
-            "threshold": 0.4,
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 100,
+            "threshold": 0.5,
         },
         suppress_blank=True,
         no_speech_threshold=0.6,
-        log_prob_threshold=-1.0,
+        log_prob_threshold=-0.5,
+        compression_ratio_threshold=2.0,
+        condition_on_previous_text=False,
         temperature=0,
+        beam_size=5,
     )
 
-    print(f"[Whisper] idioma={info.language} prob={info.language_probability:.2f}")
+    print(f"[Whisper] lang={info.language} prob={info.language_probability:.2f}")
 
     parts = []
     for seg in segments:

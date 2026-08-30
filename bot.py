@@ -24,7 +24,7 @@ CHANNELS = 2
 SAMPLE_WIDTH = 2
 BYTES_PER_SEC = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH
 
-STREAM_CHUNK_SECS = int(os.getenv("STREAM_CHUNK_SECS", "20"))
+STREAM_CHUNK_SECS = int(os.getenv("STREAM_CHUNK_SECS", "8"))
 STREAM_CHUNK_BYTES = BYTES_PER_SEC * STREAM_CHUNK_SECS
 
 intents = discord.Intents.default()
@@ -44,21 +44,24 @@ async def on_ready():
     print(f"Bot online: {bot.user} (ID: {bot.user.id})")
     await asyncio.to_thread(load_model)
 
-    # Sync instantâneo no guild de teste; global sync pode levar até 1h
     test_guild_id = os.getenv("TEST_GUILD_ID")
-    try:
-        if test_guild_id:
+    if test_guild_id:
+        try:
             guild = discord.Object(id=int(test_guild_id))
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
-        else:
-            synced = await bot.tree.sync()
-        print(f"Slash commands sincronizados: {len(synced)}")
-    except discord.Forbidden:
-        print(
-            "[AVISO] Não foi possível sincronizar slash commands — bot sem scope 'applications.commands'.\n"
-            "        Re-convide o bot com o scope correto: OAuth2 → URL Generator → marque 'applications.commands'."
-        )
+            print(f"Slash commands sincronizados (guild): {len(synced)}")
+            return
+        except discord.Forbidden:
+            print("[SYNC] Guild sync falhou (bot sem scope no servidor). Tentando global sync...")
+        except Exception as e:
+            print(f"[SYNC] Guild sync erro: {type(e).__name__}: {e}. Tentando global sync...")
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"Slash commands sincronizados (global): {len(synced)} — pode levar até 1h para aparecer no Discord.")
+    except Exception as e:
+        print(f"[SYNC ERROR] Global sync falhou: {type(e).__name__}: {e}")
 
 
 @bot.tree.command(name="record", description="Entra no seu canal de voz e inicia a gravação")
@@ -140,19 +143,27 @@ async def record_command(interaction: discord.Interaction):
     active_recordings[guild_id] = state
     state["stream_task"] = asyncio.create_task(_streaming_task(guild_id))
 
-    await transcript_channel.send(
-        f"🔴 **Gravação iniciada** — {state['session_date'].strftime('%d/%m/%Y %H:%M')}\n"
-        f"Canal de voz: **{voice_channel.name}**\n"
-        f"Transcrição em tempo real abaixo:"
+    announce_msg = await transcript_channel.send(
+        f"🔴 **Gravação iniciada** — {state['session_date'].strftime('%d/%m/%Y %H:%M')} | "
+        f"Canal: **{voice_channel.name}**"
     )
+
+    try:
+        thread = await announce_msg.create_thread(
+            name=f"Transcrição {state['session_date'].strftime('%d/%m %H:%M')}",
+            auto_archive_duration=1440,
+        )
+        state["transcript_channel"] = thread
+        await thread.send("Transcrições ao vivo aparecerão aqui. Use `/stop` para encerrar e receber o arquivo.")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"[WARN] Thread não criada: {e}. Usando canal principal.")
 
     if transcript_channel.id != interaction.channel_id:
         await interaction.followup.send(
-            f"Gravação iniciada em **{voice_channel.name}**. "
-            f"Transcrição em <#{transcript_channel.id}>."
+            f"Gravando em **{voice_channel.name}**. Transcrição em <#{transcript_channel.id}>."
         )
     else:
-        await interaction.followup.send(f"Gravação iniciada em **{voice_channel.name}**.")
+        await interaction.followup.send(f"Gravando em **{voice_channel.name}**.")
 
 
 @bot.tree.command(name="stop", description="Para a gravação e gera o JSONL para resumo")
@@ -220,7 +231,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     human_members = [m for m in vc.channel.members if not m.bot]
     if len(human_members) == 0:
-        await state["transcript_channel"].send("👤 Canal esvaziou — parando gravação automaticamente.")
+        await state["transcript_channel"].send("Canal esvaziou — parando gravação automaticamente.")
         await _do_stop(guild_id)
         if vc.is_connected():
             await vc.disconnect()
@@ -300,23 +311,25 @@ async def _resolve_username(state: dict, user_id: int) -> str:
 async def _process_new_chunks(state: dict) -> None:
     lines = []
     for user_id, pcm_data in list(state["pcm_buffers"].items()):
-        unprocessed_start = state["processed"][user_id]
-        unprocessed = pcm_data[unprocessed_start:]
+        while True:
+            unprocessed_start = state["processed"][user_id]
+            unprocessed = pcm_data[unprocessed_start:]
 
-        if len(unprocessed) < STREAM_CHUNK_BYTES:
-            continue
+            if len(unprocessed) < STREAM_CHUNK_BYTES:
+                break
 
-        chunk = bytes(unprocessed[:STREAM_CHUNK_BYTES])
-        state["processed"][user_id] += STREAM_CHUNK_BYTES
+            chunk = bytes(unprocessed[:STREAM_CHUNK_BYTES])
+            state["processed"][user_id] += STREAM_CHUNK_BYTES
 
-        text = await asyncio.to_thread(transcribe_pcm, chunk)
-        text = text.strip()
+            recent = " ".join(state["transcript_accum"][user_id][-3:])
+            text = await asyncio.to_thread(transcribe_pcm, chunk, recent)
+            text = text.strip()
 
-        if text:
-            state["transcript_accum"][user_id].append(text)
-            username = await _resolve_username(state, user_id)
-            lines.append(f"🎙️ **{username}**: {text}")
-            print(f"[STREAM] user={user_id}: {text[:60]}...")
+            if text:
+                state["transcript_accum"][user_id].append(text)
+                username = await _resolve_username(state, user_id)
+                lines.append(f"🎙️ **{username}**: {text}")
+                print(f"[STREAM] user={user_id}: {text[:60]}...")
 
     if lines:
         try:
@@ -336,7 +349,8 @@ async def _transcribe_remaining(state: dict) -> None:
             if len(remaining) < 960:
                 continue
 
-            text = await asyncio.to_thread(transcribe_pcm, remaining)
+            recent = " ".join(state["transcript_accum"][user_id][-3:])
+            text = await asyncio.to_thread(transcribe_pcm, remaining, recent)
             text = text.strip()
             if text:
                 state["transcript_accum"][user_id].append(text)
